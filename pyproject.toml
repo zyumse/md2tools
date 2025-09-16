@@ -7,7 +7,8 @@ name = "m2dtools"
 version = "0.1.0"
 description = "Multiscale MD tools: pre/post-processing for molecular dynamics simulations"
 authors = [
-    { name="ZY" }
+    { name="ZY" },
+    { name="CZ" },
 ]
 requires-python = ">=3.8"
 dependencies = [
