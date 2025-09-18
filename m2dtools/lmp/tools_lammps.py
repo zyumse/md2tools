@@ -1235,3 +1235,30 @@ def calc_compressibility(V, T=300):
     V = V * 1e-27  # Convert from nm^3 to m^3
     kappa_T = np.var(V) / (V.mean() * kB * T)
     return kappa_T * 1e9 # to 1/GPa
+
+def average_log(log_files, freq=1):
+    """
+    Average the log data from multiple files.
+    Parameters:
+        log_files: list of str
+            List of log file names.
+        freq: int
+            Frequency of the data to be read.
+    Returns:
+        df_mean: pd.DataFrame
+            DataFrame of mean values.
+        df_std: pd.DataFrame
+            DataFrame of standard deviation values.
+    """
+    dfs = []
+    for i, log_file in enumerate(log_files):
+        log = read_log_lammps(log_file, freq=freq)[-1]
+        dfs.append(log)
+
+    # Stack into a 3D array (frames × rows × columns)
+    stacked = pd.concat(dfs, keys=range(len(dfs)))  # adds outer index (frame index)
+
+    # Compute mean and std over the first level (i.e., over frames)
+    df_mean = stacked.groupby(level=1).mean()
+    df_std = stacked.groupby(level=1).std()
+    return df_mean, df_std
