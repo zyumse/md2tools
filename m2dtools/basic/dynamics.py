@@ -129,3 +129,122 @@ def compute_self_intermediate_scattering_function(positions, box_lengths, lag_ar
             cos_kr = np.cos(np.einsum('ij,tkj->tki', vectors, displacements))
         sisf[i] = np.mean(cos_kr)
     return sisf
+
+def compute_self_intermediate_scattering_function_mask(
+    positions, box_lengths, lag_array, k, num_vectors=100, n_repeat=100, atom_mask=None
+):
+    """
+    Compute self-intermediate scattering function (SISF) with optional atom masking, 
+    considering periodic boundary conditions (orthorhombic box).
+
+    Parameters
+    ----------
+    positions : np.ndarray
+        Shape (n_frames, n_atoms, 3). Wrapped coordinates per frame.
+    box_lengths : np.ndarray
+        Shape (n_frames, 3). Box lengths per frame.
+    lag_array : array-like of int
+        Lags in *frames*. (Convert to ps for plotting via t_ps = lag * dt.)
+    k : float
+        Absolute value of the wave vector |k|.
+    num_vectors : int
+        Number of random k-directions to average over.
+    n_repeat : int
+        Number of time origins t0 to sample when there are many possible origins.
+    atom_mask : None or np.ndarray
+        If None: use all atoms.
+        If 1D (n_atoms,): time-independent mask; True atoms are included for all t0.
+        If 2D (n_frames, n_atoms): time-dependent mask; atom j is included only when atom_mask[t0, j] is True.
+        In both cases, only masked atoms contribute to the SISF average.
+
+    Returns
+    -------
+    sisf : np.ndarray
+        SISF values for each lag in lag_array (same length).
+    """
+    n_frames, n_atoms, _ = positions.shape
+
+    # ---- unwrap positions under PBC (orthorhombic) ----
+    unwrapped_pos = np.zeros_like(positions)
+    unwrapped_pos[0] = positions[0]
+    for t in range(1, n_frames):
+        box_length_tmp = (box_lengths[t] + box_lengths[t - 1]) / 2.0
+        delta = positions[t] - unwrapped_pos[t - 1]
+        # minimum image in fractional coordinates, then back to Cartesian
+        delta -= box_length_tmp * np.round(delta / box_length_tmp)
+        unwrapped_pos[t] = unwrapped_pos[t - 1] + delta
+
+    # ---- pre-generate random k-directions (shape: (num_vectors, 3)) ----
+    vectors = random_vectors(k, num_vectors)
+
+    # ---- validate mask shape (if provided) ----
+    if atom_mask is not None:
+        if atom_mask.ndim == 1:
+            if atom_mask.shape[0] != n_atoms:
+                raise ValueError("atom_mask 1D must have shape (n_atoms,).")
+        elif atom_mask.ndim == 2:
+            if atom_mask.shape != (n_frames, n_atoms):
+                raise ValueError("atom_mask 2D must have shape (n_frames, n_atoms).")
+        else:
+            raise ValueError("atom_mask must be None, 1D (n_atoms,), or 2D (n_frames, n_atoms).")
+
+    sisf = np.zeros(len(lag_array), dtype=float)
+
+    for i, lag in enumerate(lag_array):
+        if lag <= 0 or lag >= n_frames:
+            sisf[i] = np.nan
+            continue
+
+        # choose time origins t0
+        n_origins_total = n_frames - lag
+        if n_origins_total <= 0:
+            sisf[i] = np.nan
+            continue
+
+        if n_origins_total <= n_repeat:
+            # use all possible time origins
+            origins = np.arange(n_origins_total)  # shape (O,)
+        else:
+            # random subset of origins
+            origins = np.random.choice(n_origins_total, size=n_repeat, replace=False)
+
+        # displacements for these origins: shape (O, n_atoms, 3)
+        disp = unwrapped_pos[origins + lag] - unwrapped_pos[origins]
+
+        # compute k·dr for all vectors and atoms/origins
+        # vectors: (V,3), disp: (O,A,3) -> dots: (V,O,A)
+        dots = np.einsum('vj,oaj->voa', vectors, disp)  # (num_vectors, n_origins, n_atoms)
+        cos_kr = np.cos(dots)  # (V,O,A)
+
+        if atom_mask is None:
+            # simple average over vectors, origins, atoms
+            sisf[i] = np.mean(cos_kr)
+
+        elif atom_mask.ndim == 1:
+            # time-independent selection of atoms
+            sel = atom_mask.astype(bool)
+            if not np.any(sel):
+                sisf[i] = np.nan
+                continue
+            cos_sel = cos_kr[:, :, sel]  # (V,O,A_sel)
+            sisf[i] = np.mean(cos_sel)
+
+        else:
+            # time-dependent selection per origin: mask[t0, atom]
+            # build a (O, A) mask for these origins
+            sel_oa = atom_mask[origins, :]  # (O, A), boolean
+            counts = sel_oa.sum()
+            if counts == 0:
+                sisf[i] = np.nan
+                continue
+            # weight average only over True entries
+            # expand sel_oa to (V,O,A) for broadcasting
+            sel_broadcast = sel_oa[None, :, :]  # (1,O,A)
+            # multiply then divide by number of selected (origins, atoms) per vector set
+            # globally average: sum over V,O,A then divide by (V * selected OA count)
+            num = (cos_kr * sel_broadcast).sum()
+            den = float(num_vectors) * float(counts)
+            sisf[i] = num / den
+
+    return sisf
+
